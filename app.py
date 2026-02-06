@@ -6,20 +6,20 @@ import io
 import random
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Dynamic Scheduling System", layout="wide", page_icon="⏱️")
+st.set_page_config(page_title="Production Scheduling System", layout="wide", page_icon="🏭")
 
 # --- KẾT NỐI GITHUB ---
 try:
     GITHUB_TOKEN = st.secrets["github"]["token"]
     REPO_NAME = st.secrets["github"]["repo_name"]
-    FILE_PATH = "jobs_data_v4.csv"
+    FILE_PATH = "jobs_data_v5.csv" # Đổi tên file để update cấu trúc mới
 except:
     st.error("⚠️ Chưa cấu hình Secrets! Hãy kiểm tra lại file .streamlit/secrets.toml")
     st.stop()
 
 # --- SIDEBAR CẤU HÌNH ---
 st.sidebar.header("⚙️ Cấu hình Dữ liệu")
-use_release = st.sidebar.checkbox("Sử dụng Release Time (Thời điểm đến)", value=True)
+use_release = st.sidebar.checkbox("Sử dụng Release Time (Thời điểm đến)", value=False) # Mặc định tắt cho giống bài tập cơ bản
 use_priority = st.sidebar.checkbox("Sử dụng Độ ưu tiên (Priority)", value=False)
 use_setup = st.sidebar.checkbox("Sử dụng Loại Setup (Nhóm máy)", value=False)
 
@@ -39,7 +39,7 @@ def get_data_from_github():
         df['Processing Time'] = pd.to_numeric(df['Processing Time'], errors='coerce').fillna(0).astype(int)
         df['Due Date'] = pd.to_numeric(df['Due Date'], errors='coerce').fillna(0).astype(int)
         
-        # Tạo cột mặc định nếu thiếu
+        # Tạo cột mặc định
         if 'Release Time' not in df.columns: df['Release Time'] = 0
         if 'Priority' not in df.columns: df['Priority'] = 1
         if 'Setup Type' not in df.columns: df['Setup Type'] = 'A'
@@ -72,7 +72,7 @@ def generate_random_jobs(n):
     setup_types = ['Type A', 'Type B', 'Type C', 'Type D']
     for i in range(1, n + 1):
         pt = random.randint(2, 10)
-        rel = random.randint(0, n) if use_release else 0
+        rel = random.randint(0, 5) if use_release else 0
         dd = rel + pt + random.randint(2, int(n))
         
         job = {
@@ -90,12 +90,11 @@ def generate_random_jobs(n):
         jobs.append(job)
     return pd.DataFrame(jobs)
 
-# --- LOGIC TÍNH TOÁN: MÔ PHỎNG (SIMULATION) ---
+# --- LOGIC TÍNH TOÁN LỊCH TRÌNH ---
 def calculate_schedule(df, rule_code):
-    # Sao chép dữ liệu
     remaining_jobs = df.copy()
     
-    # Ép kiểu số để tránh lỗi
+    # Ép kiểu số
     remaining_jobs['Release Time'] = pd.to_numeric(remaining_jobs['Release Time']).fillna(0) if use_release else 0
     remaining_jobs['Processing Time'] = pd.to_numeric(remaining_jobs['Processing Time']).fillna(0)
     remaining_jobs['Due Date'] = pd.to_numeric(remaining_jobs['Due Date']).fillna(0)
@@ -106,27 +105,22 @@ def calculate_schedule(df, rule_code):
     
     # Vòng lặp mô phỏng
     while not remaining_jobs.empty:
-        # Tìm các job đã đến
         available_mask = remaining_jobs['Release Time'] <= current_time
         available_jobs = remaining_jobs[available_mask]
         
-        # Nếu chưa có job nào -> Nhảy thời gian
         if available_jobs.empty:
             next_arrival = remaining_jobs['Release Time'].min()
-            # Nếu vì lý do gì đó mà next_arrival <= current_time (vòng lặp vô tận) thì break
-            if next_arrival <= current_time: 
-                current_time += 1 # Force tăng thời gian
-            else:
-                current_time = next_arrival
+            current_time = next_arrival if next_arrival > current_time else current_time + 1
             continue 
             
-        # Chọn Job theo RULE
         best_job_idx = None
         
+        # Các quy tắc chọn Job
         if rule_code == "SPT": best_job_idx = available_jobs['Processing Time'].idxmin()
         elif rule_code == "LPT": best_job_idx = available_jobs['Processing Time'].idxmax()
         elif rule_code == "DDATE": best_job_idx = available_jobs['Due Date'].idxmin()
-        elif rule_code == "FCFS": best_job_idx = available_jobs['Release Time'].idxmin()
+        elif rule_code == "FCFS": best_job_idx = available_jobs['Release Time'].idxmin() # Nếu cùng Release thì theo Index
+        elif rule_code == "LCFS": best_job_idx = available_jobs.index.max() # Index lớn nhất (vào sau cùng)
         elif rule_code == "SLACK": 
             slacks = available_jobs['Due Date'] - current_time - available_jobs['Processing Time']
             best_job_idx = slacks.idxmin()
@@ -143,31 +137,57 @@ def calculate_schedule(df, rule_code):
             else:
                  best_job_idx = available_jobs['Processing Time'].idxmin()
         
-        # Thực hiện Job
-        if best_job_idx is None: break # An toàn
+        if best_job_idx is None: 
+            # Fallback nếu không chọn được (thường là FCFS trong nhóm available)
+            best_job_idx = available_jobs.index[0]
 
         job = remaining_jobs.loc[best_job_idx]
         start = current_time
         finish = start + job['Processing Time']
         late = max(0, finish - job['Due Date'])
+        flow_time = finish - job['Release Time'] # Flow Time = Finish - Arrival
         
         scheduled_job = job.to_dict()
         scheduled_job['Start'] = start
         scheduled_job['Finish'] = finish
+        scheduled_job['Flow Time'] = flow_time
         scheduled_job['Lateness'] = late
         scheduled_jobs.append(scheduled_job)
         
         current_time = finish
         remaining_jobs = remaining_jobs.drop(best_job_idx)
 
-    # [FIX AN TOÀN] Trả về DataFrame rỗng có đủ cột nếu không có job nào
     if not scheduled_jobs:
-        return pd.DataFrame(columns=['Job ID', 'Start', 'Finish', 'Lateness', 'Processing Time', 'Setup Type'])
+        return pd.DataFrame()
         
     return pd.DataFrame(scheduled_jobs)
 
+# --- HÀM TÍNH TOÁN CÁC CHỈ SỐ (METRICS) THEO BÀI HỌC ---
+def calculate_metrics(df_result):
+    if df_result.empty: return {}
+    
+    sum_flow_time = df_result['Flow Time'].sum()
+    sum_work_time = df_result['Processing Time'].sum()
+    sum_lateness = df_result['Lateness'].sum()
+    num_jobs = len(df_result)
+    
+    # Công thức theo ảnh
+    avg_completion_time = sum_flow_time / num_jobs
+    utilization = (sum_work_time / sum_flow_time) * 100 # Đơn vị %
+    avg_jobs_in_system = sum_flow_time / sum_work_time
+    avg_lateness = sum_lateness / num_jobs
+    
+    return {
+        "Sum Flow Time": sum_flow_time,
+        "Sum Work Time": sum_work_time,
+        "Avg Completion Time": avg_completion_time,
+        "Utilization (%)": utilization,
+        "Avg Jobs in System": avg_jobs_in_system,
+        "Avg Lateness": avg_lateness
+    }
+
 # --- GIAO DIỆN CHÍNH ---
-st.title("⏱️ Hệ thống Lập lịch Động (Dynamic Scheduling)")
+st.title("🏭 Hệ thống Điều độ Sản xuất")
 
 if 'jobs' not in st.session_state:
     with st.spinner('Đang tải dữ liệu...'):
@@ -190,18 +210,18 @@ with tab_manual:
         cols = st.columns(cols_count)
         idx = 0
         
-        with cols[idx]: new_id = st.text_input("Job ID", placeholder="J1"); idx+=1
+        with cols[idx]: new_id = st.text_input("Job ID", placeholder="A"); idx+=1
         
         new_rel = 0
         if use_release:
-            with cols[idx]: new_rel = st.number_input("Release (Đến)", min_value=0, value=0); idx+=1
+            with cols[idx]: new_rel = st.number_input("Release Time", min_value=0, value=0); idx+=1
             
-        with cols[idx]: new_pt = st.number_input("TG Xử lý", min_value=1, value=5); idx+=1
-        with cols[idx]: new_dd = st.number_input("Hạn chót", min_value=1, value=15); idx+=1
+        with cols[idx]: new_pt = st.number_input("Processing Time", min_value=1, value=6); idx+=1
+        with cols[idx]: new_dd = st.number_input("Due Date", min_value=1, value=8); idx+=1
         
         new_prio = 1
         if use_priority:
-            with cols[idx]: new_prio = st.number_input("Ưu tiên", 1, 10, 5); idx+=1
+            with cols[idx]: new_prio = st.number_input("Priority", 1, 10, 5); idx+=1
         new_setup = "A"
         if use_setup:
             with cols[idx]: new_setup = st.selectbox("Setup", ["A", "B", "C", "D"]); idx+=1
@@ -222,7 +242,7 @@ with tab_manual:
 
 with tab_random:
     c1, c2 = st.columns([3, 1])
-    with c1: num_jobs = st.slider("Số lượng Job:", 5, 100, 10)
+    with c1: num_jobs = st.slider("Số lượng Job:", 5, 50, 5)
     with c2: 
         st.write("")
         if st.button("🎲 Tạo Mới", type="primary", use_container_width=True):
@@ -231,7 +251,7 @@ with tab_random:
                 st.session_state.jobs = random_df
                 st.rerun()
 
-# --- KHU VỰC 2: EDIT TABLE ---
+# --- KHU VỰC 2: DANH SÁCH CÔNG VIỆC ---
 st.markdown("### 2. Danh sách công việc")
 display_cols = ['Job ID']
 if use_release: display_cols.append('Release Time')
@@ -241,14 +261,14 @@ if use_setup: display_cols.append('Setup Type')
 
 col_config = {
     "Job ID": st.column_config.TextColumn("Job ID", required=True),
-    "Release Time": st.column_config.NumberColumn("Release (Ngày đến)", min_value=0),
-    "Processing Time": st.column_config.NumberColumn("TG Xử lý (Ngày)", min_value=1),
-    "Due Date": st.column_config.NumberColumn("Hạn chót (Ngày)", min_value=1),
+    "Processing Time": st.column_config.NumberColumn("Processing Time", min_value=1),
+    "Due Date": st.column_config.NumberColumn("Due Date", min_value=1),
 }
 
 edited_df = st.data_editor(st.session_state.jobs[display_cols], use_container_width=True, num_rows="dynamic", key="editor", column_config=col_config)
 
 if st.button("💾 Lưu thay đổi bảng"):
+    # Fill default values
     edited_df['Release Time'] = pd.to_numeric(edited_df.get('Release Time', 0)).fillna(0).astype(int)
     edited_df['Processing Time'] = pd.to_numeric(edited_df['Processing Time']).fillna(0).astype(int)
     edited_df['Due Date'] = pd.to_numeric(edited_df['Due Date']).fillna(0).astype(int)
@@ -262,49 +282,62 @@ if not edited_df.empty:
     st.divider()
     
     rule_map = {
-        "SPT - Ngắn nhất làm trước": "SPT",
-        "LPT - Dài nhất làm trước": "LPT",
-        "DDATE - Hạn chót sớm nhất (EDD)": "DDATE",
-        "FCFS - Đến trước làm trước": "FCFS",
-        "SLACK - Slack nhỏ nhất": "SLACK",
-        "CR - Tỷ số tới hạn": "CR"
+        "FCFS - First Come First Served": "FCFS",
+        "SPT - Shortest Processing Time": "SPT",
+        "LPT - Longest Processing Time": "LPT",
+        "DDATE - Earliest Due Date": "DDATE",
+        "LCFS - Last Come First Served": "LCFS",
+        "SLACK - Smallest Slack": "SLACK",
+        "CR - Smallest Critical Ratio": "CR"
     }
-    if use_priority: rule_map["CUSTPR - Ưu tiên khách hàng"] = "CUSTPR"
-    if use_setup: rule_map["SETUP - Theo nhóm máy"] = "SETUP"
+    if use_priority: rule_map["CUSTPR - Highest Customer Priority"] = "CUSTPR"
+    if use_setup: rule_map["SETUP - Similar Required Setups"] = "SETUP"
 
-    # --- BENCHMARK (Đã sửa lỗi tên cột) ---
-    st.header("📊 So sánh Hiệu quả")
+    # --- SO SÁNH (BENCHMARK) ---
+    st.header("📊 Bảng So Sánh Các Quy Tắc")
     comp_data = []
     
-    # Tính toán
     for name, code in rule_map.items():
         res = calculate_schedule(edited_df, code)
         if not res.empty:
+            mets = calculate_metrics(res)
             comp_data.append({
-                "Quy tắc": code, 
-                "Tổng Trễ": res['Lateness'].sum(), 
-                "Hoàn thành": res['Finish'].max(), # Đã sửa key này cho khớp
-                "TB Lưu kho": round(res['Finish'].mean(), 2)
+                "Quy tắc": code,
+                "Avg Completion Time": round(mets["Avg Completion Time"], 2),
+                "Utilization (%)": round(mets["Utilization (%)"], 2),
+                "Avg Jobs in System": round(mets["Avg Jobs in System"], 2),
+                "Avg Lateness": round(mets["Avg Lateness"], 2)
             })
             
     if comp_data:
-        # Vẽ biểu đồ
-        st.plotly_chart(
-            px.bar(
-                pd.DataFrame(comp_data), 
-                x="Quy tắc", 
-                y=["Tổng Trễ", "Hoàn thành", "TB Lưu kho"], # Tên cột y phải khớp với key ở trên
-                barmode='group',
-                title="So sánh các chỉ số (Thấp hơn là Tốt hơn)"
-            ), 
+        df_comp = pd.DataFrame(comp_data)
+        
+        # Style bảng: Tô màu giá trị tốt nhất
+        # Tốt nhất: Time & Jobs & Lateness (Thấp), Utilization (Cao)
+        st.dataframe(
+            df_comp.style.highlight_min(subset=["Avg Completion Time", "Avg Jobs in System", "Avg Lateness"], color='#dbf2ce')
+                         .highlight_max(subset=["Utilization (%)"], color='#dbf2ce'),
             use_container_width=True
         )
+        
+        # Biểu đồ so sánh
+        st.subheader("Biểu đồ so sánh")
+        tab_c1, tab_c2 = st.tabs(["Thời gian & Số lượng", "Hiệu suất & Độ trễ"])
+        
+        with tab_c1:
+            fig1 = px.bar(df_comp, x="Quy tắc", y=["Avg Completion Time", "Avg Jobs in System"], barmode='group', title="Chỉ số Thời gian & Số lượng (Thấp hơn là Tốt)")
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with tab_c2:
+            fig2 = px.bar(df_comp, x="Quy tắc", y=["Utilization (%)", "Avg Lateness"], barmode='group', title="Hiệu suất (Cao tốt) & Độ trễ (Thấp tốt)")
+            st.plotly_chart(fig2, use_container_width=True)
+            
     else:
-        st.warning("Không có dữ liệu kết quả để so sánh.")
+        st.warning("Không có dữ liệu kết quả.")
 
-    # --- GANTT CHART ---
+    # --- CHI TIẾT LỊCH TRÌNH ---
     st.divider()
-    st.subheader("🔎 Chi tiết Lịch trình")
+    st.subheader("🔎 Chi Tiết Lịch Trình (Single Rule)")
     
     selected_rule_name = st.selectbox("Chọn quy tắc:", list(rule_map.keys()))
     selected_rule_code = rule_map[selected_rule_name]
@@ -312,33 +345,40 @@ if not edited_df.empty:
     result_df = calculate_schedule(edited_df, selected_rule_code)
     
     if not result_df.empty:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Makespan", f"{result_df['Finish'].max()} ngày")
-        m2.metric("Tổng trễ", f"{result_df['Lateness'].sum()} ngày", delta_color="inverse")
-        m3.metric("Số Job trễ", f"{(result_df['Lateness'] > 0).sum()}")
+        # Tính metrics
+        metrics = calculate_metrics(result_df)
+        
+        # Hiển thị 4 thẻ chỉ số như trong bài học
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Avg Completion Time", f"{metrics['Avg Completion Time']:.1f} days", help="Sum flow time / Number of jobs")
+        c2.metric("Utilization", f"{metrics['Utilization (%)']:.1f}%", help="Total work time / Sum flow time")
+        c3.metric("Avg Jobs in System", f"{metrics['Avg Jobs in System']:.2f} jobs", help="Sum flow time / Total work time")
+        c4.metric("Avg Job Lateness", f"{metrics['Avg Lateness']:.1f} days", help="Total late days / Number of jobs")
 
+        # GANTT CHART
         color_col = "Setup Type" if selected_rule_code == "SETUP" else "Lateness"
         
-        result_df['Tooltip'] = result_df.apply(lambda x: f"Job: {x['Job ID']}<br>Start: {x['Start']}<br>Finish: {x['Finish']}<br>Late: {x['Lateness']}", axis=1)
+        # Tạo bản sao có Tooltip để vẽ
+        chart_df = result_df.copy()
+        chart_df['Tooltip'] = chart_df.apply(lambda x: f"Job: {x['Job ID']}<br>Start: {x['Start']}<br>Finish: {x['Finish']}<br>Flow: {x['Flow Time']}", axis=1)
         
         fig = px.bar(
-            result_df,
+            chart_df,
             base="Start", x="Processing Time", y="Job ID", orientation='h',
             color=color_col,
             text="Processing Time",
             hover_data={"Tooltip": True, "Start": False, "Processing Time": False, "Job ID": False},
-            title=f"Lịch trình - {selected_rule_name}",
+            title=f"Sequence: {'-'.join(result_df['Job ID'].tolist())}",
             color_continuous_scale="RdYlGn_r" if color_col == "Lateness" else None
         )
         
-        fig.update_layout(
-            xaxis_title="Thời gian (Ngày thứ 0, 1, 2...)",
-            yaxis=dict(autorange="reversed"),
-            height=400 + (len(result_df) * 20)
-        )
+        fig.update_layout(xaxis_title="Time", yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
         
-        with st.expander("Xem bảng chi tiết"):
-            st.dataframe(result_df)
+        # BẢNG CHI TIẾT (Xóa cột Tooltip, thêm cột Flow Time)
+        with st.expander("Xem bảng dữ liệu chi tiết", expanded=True):
+            # Chọn các cột cần hiển thị
+            show_cols = ['Job ID', 'Processing Time', 'Flow Time', 'Due Date', 'Lateness', 'Start', 'Finish']
+            st.dataframe(result_df[show_cols], use_container_width=True)
     else:
         st.info("Chưa có lịch trình nào được tạo.")
