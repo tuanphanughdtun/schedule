@@ -17,20 +17,32 @@ except:
     st.stop()
 
 def get_data_from_github():
-    """Lấy dữ liệu từ GitHub"""
+    """Lấy dữ liệu và ÉP KIỂU SỐ ngay lập tức để tránh lỗi"""
     try:
         g = Github(GITHUB_TOKEN)
         repo = g.get_repo(REPO_NAME)
         contents = repo.get_contents(FILE_PATH)
         decoded = contents.decoded_content.decode("utf-8")
+        
         if not decoded:
             return pd.DataFrame(columns=['Job ID', 'Processing Time', 'Due Date'])
-        return pd.read_csv(io.StringIO(decoded))
-    except:
+        
+        df = pd.read_csv(io.StringIO(decoded))
+        
+        # --- QUAN TRỌNG: Ép kiểu dữ liệu để không bị lỗi StreamlitAPIException ---
+        # 1. Ép cột Job ID thành chuỗi (String)
+        df['Job ID'] = df['Job ID'].astype(str)
+        
+        # 2. Ép cột thời gian thành số (Int), nếu lỗi biến thành 0
+        df['Processing Time'] = pd.to_numeric(df['Processing Time'], errors='coerce').fillna(0).astype(int)
+        df['Due Date'] = pd.to_numeric(df['Due Date'], errors='coerce').fillna(0).astype(int)
+        
+        return df
+    except Exception as e:
+        # Trả về bảng rỗng nếu lỗi để app không bị crash
         return pd.DataFrame(columns=['Job ID', 'Processing Time', 'Due Date'])
 
 def save_data_to_github(df, message):
-    """Lưu dữ liệu lên GitHub"""
     try:
         g = Github(GITHUB_TOKEN)
         repo = g.get_repo(REPO_NAME)
@@ -49,35 +61,25 @@ def save_data_to_github(df, message):
 def calculate_schedule(df, rule_selection):
     data = df.copy()
     
-    # --- [FIX BUG] CHUYỂN DỮ LIỆU VỀ DẠNG SỐ ---
-    # Đảm bảo cột thời gian là số, nếu lỗi thì chuyển về 0
+    # Đảm bảo dữ liệu là số trước khi tính (phòng hờ)
     data['Processing Time'] = pd.to_numeric(data['Processing Time'], errors='coerce').fillna(0)
     data['Due Date'] = pd.to_numeric(data['Due Date'], errors='coerce').fillna(0)
-    # -------------------------------------------
     
-    # Xử lý chuỗi quy tắc
     rule = rule_selection.split("(")[-1].replace(")", "")
     
-    # Sắp xếp
-    if rule == "FCFS": 
-        pass 
-    elif rule == "SPT": 
-        data = data.sort_values(by="Processing Time")
-    elif rule == "EDD": 
-        data = data.sort_values(by="Due Date")
-    elif rule == "LPT": 
-        data = data.sort_values(by="Processing Time", ascending=False)
+    if rule == "SPT": data = data.sort_values(by="Processing Time")
+    elif rule == "EDD": data = data.sort_values(by="Due Date")
+    elif rule == "LPT": data = data.sort_values(by="Processing Time", ascending=False)
     elif rule == "STR": 
         data['Slack'] = data['Due Date'] - data['Processing Time']
         data = data.sort_values(by="Slack")
+    # FCFS giữ nguyên
 
-    # Tính toán
     current_time = 0
     start_times, finish_times, lateness = [], [], []
     
     for _, row in data.iterrows():
         start = current_time
-        # Vì đã ép kiểu ở trên nên phép cộng này sẽ không bị lỗi nữa
         finish = start + row['Processing Time']
         late = max(0, finish - row['Due Date'])
         
@@ -99,6 +101,7 @@ if 'jobs' not in st.session_state:
     with st.spinner('Đang đồng bộ dữ liệu...'):
         st.session_state.jobs = get_data_from_github()
 
+# 2. Đảm bảo biến df_jobs luôn sạch sẽ
 df_jobs = st.session_state.jobs
 
 # --- KHU VỰC NHẬP LIỆU ---
@@ -113,39 +116,47 @@ with st.container(border=True):
         st.write("") 
         st.write("") 
         if st.button("➕ Thêm Job", use_container_width=True, type="primary"):
-            if new_id and new_id not in df_jobs['Job ID'].values:
-                # Tạo DataFrame mới đảm bảo đúng kiểu dữ liệu
-                new_row = pd.DataFrame({
-                    'Job ID': [str(new_id)], 
-                    'Processing Time': [int(new_pt)], 
-                    'Due Date': [int(new_dd)]
-                })
-                updated_df = pd.concat([df_jobs, new_row], ignore_index=True)
-                if save_data_to_github(updated_df, f"Add {new_id}"):
-                    st.session_state.jobs = updated_df
-                    st.success(f"Đã thêm {new_id}")
-                    st.rerun()
+            if new_id:
+                # Kiểm tra trùng ID
+                current_ids = df_jobs['Job ID'].astype(str).values
+                if new_id not in current_ids:
+                    new_row = pd.DataFrame({
+                        'Job ID': [str(new_id)], 
+                        'Processing Time': [int(new_pt)], 
+                        'Due Date': [int(new_dd)]
+                    })
+                    updated_df = pd.concat([df_jobs, new_row], ignore_index=True)
+                    if save_data_to_github(updated_df, f"Add {new_id}"):
+                        st.session_state.jobs = updated_df
+                        st.success(f"Đã thêm {new_id}")
+                        st.rerun()
+                else:
+                    st.warning("Job ID này đã tồn tại!")
             else:
-                st.warning("Job ID bị thiếu hoặc đã tồn tại!")
+                st.warning("Vui lòng nhập Job ID")
 
 # --- KHU VỰC BẢNG DỮ LIỆU ---
 st.markdown("### 2. Danh sách công việc (Sửa trực tiếp)")
 
-# Cấu hình bảng để cột số chỉ nhận số (Tránh người dùng nhập chữ vào)
+# Cấu hình bảng chặt chẽ để không lỗi
 edited_df = st.data_editor(
     df_jobs,
     use_container_width=True,
     num_rows="dynamic",
     key="editor",
     column_config={
-        "Processing Time": st.column_config.NumberColumn(min_value=0, format="%d"),
-        "Due Date": st.column_config.NumberColumn(min_value=0, format="%d"),
-        "Job ID": st.column_config.TextColumn(required=True)
+        "Job ID": st.column_config.TextColumn("Mã Công Việc (Job ID)", required=True),
+        "Processing Time": st.column_config.NumberColumn("TG Xử lý (Processing Time)", min_value=0, format="%d"),
+        "Due Date": st.column_config.NumberColumn("Hạn chót (Due Date)", min_value=0, format="%d"),
     }
 )
 
 if not edited_df.equals(df_jobs):
     if st.button("💾 Lưu cập nhật bảng lên Cloud", type="primary"):
+        # Ép kiểu lại lần nữa trước khi lưu cho chắc chắn
+        edited_df['Processing Time'] = pd.to_numeric(edited_df['Processing Time']).fillna(0).astype(int)
+        edited_df['Due Date'] = pd.to_numeric(edited_df['Due Date']).fillna(0).astype(int)
+        
         if save_data_to_github(edited_df, "Update table"):
             st.session_state.jobs = edited_df
             st.success("Đã lưu thay đổi!")
@@ -169,13 +180,11 @@ if not edited_df.empty:
     try:
         result_df = calculate_schedule(edited_df, selected_rule)
         
-        # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Makespan", f"{result_df['Finish'].max()}")
         m2.metric("Mean Flow Time", f"{result_df['Finish'].mean():.2f}")
         m3.metric("Total Tardiness", f"{result_df['Lateness'].sum()}")
 
-        # Gantt Chart
         base_date = pd.Timestamp("2024-01-01 08:00")
         gantt_data = result_df.copy()
         gantt_data['Start_Date'] = base_date + pd.to_timedelta(gantt_data['Start'], unit='m')
@@ -192,4 +201,4 @@ if not edited_df.empty:
         fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
-        st.error(f"Có lỗi khi tính toán: {e}. Vui lòng kiểm tra lại dữ liệu đầu vào.")
+        st.error(f"Lỗi tính toán: {e}")
