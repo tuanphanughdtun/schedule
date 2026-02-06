@@ -1,6 +1,6 @@
 Job ID,Processing Time,Due Date,Priority,Setup Type
-J1,15,17,8,Type A
-J2,14,17,2,Type B
-J3,10,12,3,Type D
-J4,12,14,3,Type D
-J5,9,14,6,Type C
+J1,2,7,3,A
+J2,2,3,6,A
+J3,13,16,1,A
+J4,2,2,1,A
+J5,12,15,1,A
